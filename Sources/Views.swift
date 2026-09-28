@@ -15,6 +15,7 @@ struct SonosBarApp: App {
 
 struct ContentView: View {
     @Environment(SonosModel.self) private var model
+    @State private var listHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -53,8 +54,9 @@ struct ContentView: View {
                     }
                 }
                 .padding(8)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
             }
-            .frame(maxHeight: 560)
+            .frame(height: min(max(listHeight, 60), 560))
 
             Divider()
 
