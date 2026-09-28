@@ -1,0 +1,262 @@
+import Foundation
+import Observation
+
+struct Room: Identifiable, Hashable {
+    let id: String   // RINCON_… UUID
+    let name: String
+    let host: String // ip:1400
+    var volume: Int?
+}
+
+struct ZoneGroup: Identifiable {
+    let id: String   // coordinator UUID
+    let household: Int
+    var rooms: [Room]
+    var state = ""
+    var title: String?
+    var subtitle: String?
+    var art: String?
+    var volume: Int?
+
+    var coordinator: Room { rooms.first { $0.id == id } ?? rooms[0] }
+    var name: String { rooms.map(\.name).joined(separator: " + ") }
+    var isPlaying: Bool { state == "PLAYING" || state == "TRANSITIONING" }
+}
+
+struct Favorite: Identifiable {
+    let id: String
+    let title: String
+    let uri: String
+    let meta: String
+    let art: String?
+    let isStation: Bool
+}
+
+@MainActor @Observable
+final class SonosModel {
+    var groups: [ZoneGroup] = []
+    var favorites: [Int: [Favorite]] = [:]
+    var expanded: String?
+    var error: String?
+    var loading = false
+
+    /// One reachable speaker per Sonos system (S1 and S2 are separate systems).
+    private var householdHosts: [String] = []
+    private var polling: Task<Void, Never>?
+
+    var allRooms: [Room] { groups.flatMap(\.rooms) }
+
+    // MARK: Refresh
+
+    func start() {
+        polling?.cancel()
+        polling = Task {
+            while !Task.isCancelled {
+                await refresh()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    func stop() {
+        polling?.cancel()
+        polling = nil
+    }
+
+    func refresh(rediscover: Bool = false) async {
+        if rediscover || householdHosts.isEmpty {
+            loading = true
+            var found = await Task.detached { SonosAPI.discover() }.value
+            if found.isEmpty { found = await Task.detached { SonosAPI.discover(seconds: 3) }.value }
+            loading = false
+            householdHosts = found.sorted()
+            if found.isEmpty {
+                error = "No Sonos speakers found on this network."
+                groups = []
+                return
+            }
+        }
+        do {
+            var newGroups = try await loadTopology()
+            for i in newGroups.indices {
+                await loadPlayback(&newGroups[i])
+                if newGroups[i].id == expanded { await loadVolumes(&newGroups[i]) }
+            }
+            groups = newGroups.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            error = nil
+            for h in householdHosts.indices where favorites[h] == nil {
+                favorites[h] = (try? await loadFavorites(householdHosts[h])) ?? []
+            }
+        } catch {
+            if !rediscover { await refresh(rediscover: true) } else { self.error = error.localizedDescription }
+        }
+    }
+
+    /// Reads rooms and groups from each Sonos system on the network.
+    private func loadTopology() async throws -> [ZoneGroup] {
+        var covered = Set<String>()
+        var result: [ZoneGroup] = []
+        var households: [String] = []
+
+        for host in householdHosts where !covered.contains(host) {
+            let reply = try await SonosAPI.call(host, .topology, "GetZoneGroupState")
+            guard let state = reply.value("ZoneGroupState"),
+                  let tree = XMLTree.parse(Data(state.utf8)) else { continue }
+            let household = households.count
+            households.append(host)
+
+            // Every device with a Location (including subs, surrounds, and hidden members) belongs to this system.
+            for node in tree.all("ZoneGroupMember") + tree.all("Satellite") {
+                if let h = hostOf(node.attrs["Location"]) { covered.insert(h) }
+            }
+
+            for g in tree.all("ZoneGroup") {
+                guard let coord = g.attrs["Coordinator"] else { continue }
+                let rooms: [Room] = g.children.compactMap { m in
+                    guard m.name == "ZoneGroupMember", m.attrs["Invisible"] != "1", m.attrs["IsZoneBridge"] != "1",
+                          let id = m.attrs["UUID"], let name = m.attrs["ZoneName"], let h = hostOf(m.attrs["Location"]) else { return nil }
+                    return Room(id: id, name: name, host: h)
+                }
+                if !rooms.isEmpty { result.append(ZoneGroup(id: coord, household: household, rooms: rooms)) }
+            }
+        }
+        householdHosts = households
+        return result
+    }
+
+    private func hostOf(_ location: String?) -> String? {
+        guard let location, let url = URL(string: location), let h = url.host else { return nil }
+        return "\(h):\(url.port ?? 1400)"
+    }
+
+    private func loadPlayback(_ group: inout ZoneGroup) async {
+        let host = group.coordinator.host
+        let transport = try? await SonosAPI.call(host, .avTransport, "GetTransportInfo", [SonosAPI.instance])
+        group.state = transport?.value("CurrentTransportState") ?? ""
+
+        let position = try? await SonosAPI.call(host, .avTransport, "GetPositionInfo", [SonosAPI.instance])
+        let trackURI = position?.value("TrackURI") ?? ""
+        let track = SonosAPI.didl(position?.value("TrackMetaData"), host: host)
+
+        let media = try? await SonosAPI.call(host, .avTransport, "GetMediaInfo", [SonosAPI.instance])
+        let source = SonosAPI.didl(media?.value("CurrentURIMetaData"), host: host)
+
+        if trackURI.hasPrefix("x-sonos-htastream") {
+            group.title = "TV"
+            group.subtitle = nil
+        } else if trackURI.hasPrefix("x-rincon-stream") {
+            group.title = "Line-In"
+            group.subtitle = nil
+        } else if let stream = track?.stream, !stream.isEmpty {
+            // Radio: the station sends the current song as "streamContent".
+            group.title = stream
+            group.subtitle = source?.title ?? track?.title
+        } else {
+            let title = track?.title.flatMap { $0.hasPrefix("x-") ? nil : $0 }
+            group.title = title ?? source?.title
+            group.subtitle = title == nil ? nil : track?.artist
+        }
+        group.art = track?.art ?? source?.art
+    }
+
+    private func loadVolumes(_ group: inout ZoneGroup) async {
+        let host = group.coordinator.host
+        _ = try? await SonosAPI.call(host, .groupRendering, "SnapshotGroupVolume", [SonosAPI.instance])
+        let gv = try? await SonosAPI.call(host, .groupRendering, "GetGroupVolume", [SonosAPI.instance])
+        group.volume = gv?.value("CurrentVolume").flatMap(Int.init)
+        for i in group.rooms.indices {
+            let v = try? await SonosAPI.call(group.rooms[i].host, .rendering, "GetVolume", [SonosAPI.instance, ("Channel", "Master")])
+            group.rooms[i].volume = v?.value("CurrentVolume").flatMap(Int.init)
+        }
+    }
+
+    private func loadFavorites(_ host: String) async throws -> [Favorite] {
+        let reply = try await SonosAPI.call(host, .content, "Browse", [
+            ("ObjectID", "FV:2"), ("BrowseFlag", "BrowseDirectChildren"), ("Filter", "*"),
+            ("StartingIndex", "0"), ("RequestedCount", "200"), ("SortCriteria", ""),
+        ])
+        guard let result = reply.value("Result"), let tree = XMLTree.parse(Data(result.utf8)) else { return [] }
+        return tree.all("item").compactMap { item in
+            guard let title = item.value("dc:title"), let uri = item.value("res") else { return nil }
+            let meta = item.value("r:resMD") ?? ""
+            let cls = SonosAPI.didl(meta, host: host)?.itemClass ?? ""
+            return Favorite(
+                id: item.attrs["id"] ?? title, title: title, uri: uri, meta: meta,
+                art: SonosAPI.artURL(item.value("upnp:albumArtURI"), host: host),
+                isStation: cls.contains("audioBroadcast")
+            )
+        }
+    }
+
+    // MARK: Actions
+
+    private func run(_ work: () async throws -> Void) async {
+        do {
+            try await work()
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+        await refresh()
+    }
+
+    func togglePlay(_ group: ZoneGroup) async {
+        await run {
+            let action = group.isPlaying ? "Pause" : "Play"
+            var args = [SonosAPI.instance]
+            if action == "Play" { args.append(("Speed", "1")) }
+            try await SonosAPI.call(group.coordinator.host, .avTransport, action, args)
+        }
+    }
+
+    func skip(_ group: ZoneGroup, forward: Bool) async {
+        await run {
+            try await SonosAPI.call(group.coordinator.host, .avTransport, forward ? "Next" : "Previous", [SonosAPI.instance])
+        }
+    }
+
+    func setGroupVolume(_ group: ZoneGroup, _ volume: Int) async {
+        let host = group.coordinator.host
+        _ = try? await SonosAPI.call(host, .groupRendering, "SnapshotGroupVolume", [SonosAPI.instance])
+        _ = try? await SonosAPI.call(host, .groupRendering, "SetGroupVolume", [SonosAPI.instance, ("DesiredVolume", String(volume))])
+    }
+
+    func setRoomVolume(_ room: Room, _ volume: Int) async {
+        _ = try? await SonosAPI.call(room.host, .rendering, "SetVolume", [SonosAPI.instance, ("Channel", "Master"), ("DesiredVolume", String(volume))])
+    }
+
+    /// Adds a room to this group, or takes it out if it's already in it.
+    func toggleRoom(_ room: Room, in group: ZoneGroup) async {
+        await run {
+            if group.rooms.contains(where: { $0.id == room.id }) {
+                try await SonosAPI.call(room.host, .avTransport, "BecomeCoordinatorOfStandaloneGroup", [SonosAPI.instance])
+            } else {
+                try await SonosAPI.call(room.host, .avTransport, "SetAVTransportURI", [
+                    SonosAPI.instance, ("CurrentURI", "x-rincon:\(group.id)"), ("CurrentURIMetaData", ""),
+                ])
+            }
+        }
+    }
+
+    func play(_ favorite: Favorite, on group: ZoneGroup) async {
+        await run {
+            let host = group.coordinator.host
+            if favorite.isStation {
+                try await SonosAPI.call(host, .avTransport, "SetAVTransportURI", [
+                    SonosAPI.instance, ("CurrentURI", favorite.uri), ("CurrentURIMetaData", favorite.meta),
+                ])
+            } else {
+                // Albums, playlists, and tracks go through the queue.
+                try await SonosAPI.call(host, .avTransport, "RemoveAllTracksFromQueue", [SonosAPI.instance])
+                try await SonosAPI.call(host, .avTransport, "AddURIToQueue", [
+                    SonosAPI.instance, ("EnqueuedURI", favorite.uri), ("EnqueuedURIMetaData", favorite.meta),
+                    ("DesiredFirstTrackNumberEnqueued", "0"), ("EnqueueAsNext", "0"),
+                ])
+                try await SonosAPI.call(host, .avTransport, "SetAVTransportURI", [
+                    SonosAPI.instance, ("CurrentURI", "x-rincon-queue:\(group.id)#0"), ("CurrentURIMetaData", ""),
+                ])
+            }
+            try await SonosAPI.call(host, .avTransport, "Play", [SonosAPI.instance, ("Speed", "1")])
+        }
+    }
+}
