@@ -47,6 +47,11 @@ final class SonosModel {
     private var polling: Task<Void, Never>?
     private let streamer = MacAudioStreamer()
     private var macAudioWatch: Task<Void, Never>?
+    /// Mac audio and Spotify come out at very different loudness, so each keeps its own volume:
+    /// the speakers' volume from before Mac audio started, put back when it stops.
+    private var macAudioHost: String?
+    private var volumeBeforeMac: Int?
+    private static let macVolumeKey = "macAudioVolume"
 
     var allRooms: [Room] { groups.flatMap(\.rooms) }
 
@@ -286,6 +291,12 @@ final class SonosModel {
             <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="R:0/0/0" parentID="R:0/0" restricted="true"><dc:title>Mac audio</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON65031_</desc></item></DIDL-Lite>
             """
             do {
+                // Switch to the volume Mac audio had last time (38 the first time), remembering the current one.
+                let current = try? await SonosAPI.call(host, .groupRendering, "GetGroupVolume", [SonosAPI.instance])
+                volumeBeforeMac = current?.value("CurrentVolume").flatMap(Int.init)
+                macAudioHost = host
+                let saved = UserDefaults.standard.object(forKey: Self.macVolumeKey) as? Int ?? 38
+                await setGroupVolume(group, saved)
                 try await SonosAPI.call(host, .avTransport, "SetAVTransportURI", [
                     SonosAPI.instance, ("CurrentURI", uri), ("CurrentURIMetaData", meta),
                 ])
@@ -339,5 +350,24 @@ final class SonosModel {
         macAudioWatch = nil
         streamer.stop()
         macAudioGroup = nil
+        restoreVolumeAfterMac()
+    }
+
+    /// Saves where the volume ended up for next time, then puts back the volume from before Mac audio.
+    private func restoreVolumeAfterMac() {
+        guard let host = macAudioHost else { return }
+        let before = volumeBeforeMac
+        macAudioHost = nil
+        volumeBeforeMac = nil
+        Task {
+            let current = try? await SonosAPI.call(host, .groupRendering, "GetGroupVolume", [SonosAPI.instance])
+            if let macVolume = current?.value("CurrentVolume").flatMap(Int.init) {
+                UserDefaults.standard.set(macVolume, forKey: Self.macVolumeKey)
+            }
+            guard let before else { return }
+            _ = try? await SonosAPI.call(host, .groupRendering, "SnapshotGroupVolume", [SonosAPI.instance])
+            _ = try? await SonosAPI.call(host, .groupRendering, "SetGroupVolume", [SonosAPI.instance, ("DesiredVolume", String(before))])
+            MacAudioStreamer.log("volume back to \(before) (Mac audio was at \(current?.value("CurrentVolume") ?? "?"))")
+        }
     }
 }
