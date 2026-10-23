@@ -12,6 +12,11 @@ final class MacAudioStreamer {
     private static let ffmpeg = "/opt/homebrew/bin/ffmpeg"
 
     private let queue = DispatchQueue(label: "sonosbar.macaudio")
+    // Capture gets its own queue so a slow network moment can't delay the audio.
+    private let audioQueue = DispatchQueue(label: "sonosbar.macaudio.capture", qos: .userInteractive)
+    private var silenceTimer: DispatchSourceTimer?
+    private var lastAudio = DispatchTime.now()
+    private var sampleRate = 48000.0
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var deviceID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
@@ -46,6 +51,8 @@ final class MacAudioStreamer {
     }
 
     func stop() {
+        silenceTimer?.cancel()
+        silenceTimer = nil
         if let procID, deviceID != kAudioObjectUnknown {
             AudioDeviceStop(deviceID, procID)
             AudioDeviceDestroyIOProcID(deviceID, procID)
@@ -56,8 +63,11 @@ final class MacAudioStreamer {
         if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
         tapID = AudioObjectID(kAudioObjectUnknown)
 
-        try? encoderInput?.close()
-        encoderInput = nil
+        audioQueue.sync {
+            try? encoderInput?.close()
+            encoderInput = nil
+        }
+        encoder?.terminationHandler = nil
         encoder?.terminate()
         encoder = nil
 
@@ -68,6 +78,18 @@ final class MacAudioStreamer {
             clients = []
         }
         port = 0
+    }
+
+    static func log(_ message: String) {
+        let url = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Logs/SonosBar.log")
+        let line = Data("\(Date().formatted(.iso8601)) \(message)\n".utf8)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(line)
+            try? handle.close()
+        } else {
+            try? line.write(to: url)
+        }
     }
 
     // MARK: Capture
@@ -97,18 +119,38 @@ final class MacAudioStreamer {
             kAudioAggregateDeviceTapListKey: [[kAudioSubTapDriftCompensationKey: true, kAudioSubTapUIDKey: desc.uuid.uuidString]],
         ]
         try check(AudioHardwareCreateAggregateDevice(config as CFDictionary, &deviceID), "create the capture device")
+        sampleRate = format.mSampleRate
+        Self.log("capture started: \(Int(format.mSampleRate)) Hz, \(format.mChannelsPerFrame) ch, flags \(format.mFormatFlags)")
         return format.mSampleRate
     }
 
     private func startCapture() throws {
-        try check(AudioDeviceCreateIOProcIDWithBlock(&procID, deviceID, queue) { [weak self] _, input, _, _, _ in
-            guard let self, let handle = self.encoderInput else { return }
+        try check(AudioDeviceCreateIOProcIDWithBlock(&procID, deviceID, audioQueue) { [weak self] _, input, _, _, _ in
+            guard let self else { return }
             let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
             // The tap's stream comes after any input streams of the output device, so it's the last buffer.
             guard let buffer = buffers.last, let data = buffer.mData, buffer.mDataByteSize > 0 else { return }
-            try? handle.write(contentsOf: Data(bytes: data, count: Int(buffer.mDataByteSize)))
+            self.lastAudio = .now()
+            self.encode(Data(bytes: data, count: Int(buffer.mDataByteSize)))
         }, "start capturing")
         try check(AudioDeviceStart(deviceID, procID), "start capturing")
+
+        // If the Mac sends nothing for a moment (say, between videos), keep the stream going with
+        // silence. A speaker that stops getting data gives up and stops playing.
+        let timer = DispatchSource.makeTimerSource(queue: audioQueue)
+        let tick = 0.1
+        let silence = Data(count: Int(sampleRate * tick) * 2 * MemoryLayout<Float32>.size)
+        timer.schedule(deadline: .now() + tick, repeating: tick)
+        timer.setEventHandler { [weak self] in
+            guard let self, DispatchTime.now().uptimeNanoseconds - self.lastAudio.uptimeNanoseconds > 200_000_000 else { return }
+            self.encode(silence)
+        }
+        timer.resume()
+        silenceTimer = timer
+    }
+
+    private func encode(_ samples: Data) {
+        try? encoderInput?.write(contentsOf: samples)
     }
 
     // MARK: Encoding
@@ -130,6 +172,9 @@ final class MacAudioStreamer {
             guard !chunk.isEmpty else { handle.readabilityHandler = nil; return }
             self?.broadcast(chunk)
         }
+        process.terminationHandler = { p in Self.log("encoder exited (status \(p.terminationStatus))") }
+        // Writing to the encoder after it exits must not kill the app.
+        signal(SIGPIPE, SIG_IGN)
         try process.run()
         encoder = process
         encoderInput = input.fileHandleForWriting
@@ -175,6 +220,7 @@ final class MacAudioStreamer {
                 connection.cancel()
             } else {
                 self.clients.append(connection)
+                Self.log("speaker connected: \(connection.endpoint)")
             }
         }
     }
@@ -184,7 +230,10 @@ final class MacAudioStreamer {
             self.clients.removeAll { $0.state == .cancelled || $0.state.isFailed }
             for client in self.clients {
                 client.send(content: chunk, completion: .contentProcessed { error in
-                    if error != nil { client.cancel() }
+                    if let error {
+                        Self.log("speaker dropped: \(client.endpoint) (\(error))")
+                        client.cancel()
+                    }
                 })
             }
         }

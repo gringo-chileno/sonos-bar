@@ -46,6 +46,7 @@ final class SonosModel {
     private var householdHosts: [String] = []
     private var polling: Task<Void, Never>?
     private let streamer = MacAudioStreamer()
+    private var macAudioWatch: Task<Void, Never>?
 
     var allRooms: [Room] { groups.flatMap(\.rooms) }
 
@@ -86,7 +87,6 @@ final class SonosModel {
                 if newGroups[i].id == expanded { await loadVolumes(&newGroups[i]) }
             }
             groups = newGroups.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            checkMacAudio()
             error = nil
             for h in householdHosts.indices where favorites[h] == nil {
                 favorites[h] = (try? await loadFavorites(householdHosts[h])) ?? []
@@ -208,6 +208,10 @@ final class SonosModel {
     }
 
     func togglePlay(_ group: ZoneGroup) async {
+        if group.isPlaying && macAudioGroup == group.id {
+            await toggleMacAudio(on: group)
+            return
+        }
         await run {
             let action = group.isPlaying ? "Pause" : "Play"
             var args = [SonosAPI.instance]
@@ -271,8 +275,7 @@ final class SonosModel {
     func toggleMacAudio(on group: ZoneGroup) async {
         let host = group.coordinator.host
         if macAudioGroup == group.id {
-            streamer.stop()
-            macAudioGroup = nil
+            stopMacAudio("stopped from Sonos Bar")
             await run { try await SonosAPI.call(host, .avTransport, "Stop", [SonosAPI.instance]) }
             return
         }
@@ -288,17 +291,52 @@ final class SonosModel {
                 ])
                 try await SonosAPI.call(host, .avTransport, "Play", [SonosAPI.instance, ("Speed", "1")])
             } catch {
-                streamer.stop()
-                macAudioGroup = nil
+                stopMacAudio("couldn't start: \(error.localizedDescription)")
                 throw error
+            }
+            MacAudioStreamer.log("playing Mac audio on \(group.name)")
+            watchMacAudio(host: host)
+        }
+    }
+
+    /// Every few seconds: if the speakers dropped the stream, press Play again; if they've moved on to
+    /// something else, stop capturing so the Mac's own sound comes back. Runs with the panel closed too.
+    private func watchMacAudio(host: String) {
+        macAudioWatch?.cancel()
+        macAudioWatch = Task {
+            var misses = 0
+            var lastRestart = Date.distantPast
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+                guard let position = try? await SonosAPI.call(host, .avTransport, "GetPositionInfo", [SonosAPI.instance]),
+                      let transport = try? await SonosAPI.call(host, .avTransport, "GetTransportInfo", [SonosAPI.instance]) else {
+                    continue // speaker didn't answer this time; try again next round
+                }
+                let uri = position.value("TrackURI") ?? ""
+                let state = transport.value("CurrentTransportState") ?? ""
+                if !uri.hasSuffix(MacAudioStreamer.path) {
+                    // Only give up after two checks in a row, so one odd answer can't cut the music.
+                    misses += 1
+                    if misses >= 2 { stopMacAudio("speakers switched to \(uri.isEmpty ? "nothing" : uri)"); return }
+                    continue
+                }
+                misses = 0
+                if state == "STOPPED" {
+                    // Stopped again right after a restart: someone is pausing it on purpose, so let it be.
+                    if Date().timeIntervalSince(lastRestart) < 60 { stopMacAudio("stopped again after a restart"); return }
+                    lastRestart = Date()
+                    MacAudioStreamer.log("speakers stopped the stream, pressing Play")
+                    _ = try? await SonosAPI.call(host, .avTransport, "Play", [SonosAPI.instance, ("Speed", "1")])
+                }
             }
         }
     }
 
-    /// Stops capturing once the speakers have moved on to something else, so the Mac's own sound comes back.
-    private func checkMacAudio() {
-        guard let id = macAudioGroup else { return }
-        if let group = groups.first(where: { $0.id == id }), group.title == "Mac audio" { return }
+    private func stopMacAudio(_ reason: String) {
+        MacAudioStreamer.log("stopping Mac audio: \(reason)")
+        macAudioWatch?.cancel()
+        macAudioWatch = nil
         streamer.stop()
         macAudioGroup = nil
     }
