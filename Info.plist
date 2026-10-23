@@ -2,14 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleIdentifier</key>
-	<string>com.gringochileno.sonosbar</string>
-	<key>CFBundleName</key>
-	<string>Sonos Bar</string>
 	<key>CFBundleDisplayName</key>
 	<string>Sonos Bar</string>
 	<key>CFBundleExecutable</key>
 	<string>SonosBar</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.gringochileno.sonosbar</string>
+	<key>CFBundleName</key>
+	<string>Sonos Bar</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -17,11 +17,9 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
+	<string>14.2</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Sonos Bar talks to the Sonos speakers on your home network.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -29,5 +27,9 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Sonos Bar captures the sound your Mac is playing so it can send it to your Sonos speakers.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Sonos Bar talks to the Sonos speakers on your home network.</string>
 </dict>
 </plist>

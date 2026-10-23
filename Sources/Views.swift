@@ -159,6 +159,17 @@ struct GroupDetail: View {
                 }
             }
 
+            let sendingMac = model.macAudioGroup == group.id
+            Button {
+                Task { await model.toggleMacAudio(on: group) }
+            } label: {
+                Label(sendingMac ? "Stop Mac audio" : "Play Mac audio here",
+                      systemImage: sendingMac ? "stop.circle.fill" : "laptopcomputer")
+                    .frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .help("Send everything this Mac is playing to these speakers (a few seconds behind)")
+
             SectionTitle("Rooms")
             ForEach(model.allRooms.filter { room in
                 model.groups.first { $0.rooms.contains(room) }?.household == group.household

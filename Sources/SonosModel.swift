@@ -39,10 +39,13 @@ final class SonosModel {
     var expanded: String?
     var error: String?
     var loading = false
+    /// The group currently playing the Mac's audio, if any.
+    var macAudioGroup: String?
 
     /// One reachable speaker per Sonos system (S1 and S2 are separate systems).
     private var householdHosts: [String] = []
     private var polling: Task<Void, Never>?
+    private let streamer = MacAudioStreamer()
 
     var allRooms: [Room] { groups.flatMap(\.rooms) }
 
@@ -83,6 +86,7 @@ final class SonosModel {
                 if newGroups[i].id == expanded { await loadVolumes(&newGroups[i]) }
             }
             groups = newGroups.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            checkMacAudio()
             error = nil
             for h in householdHosts.indices where favorites[h] == nil {
                 favorites[h] = (try? await loadFavorites(householdHosts[h])) ?? []
@@ -141,7 +145,10 @@ final class SonosModel {
         let media = try? await SonosAPI.call(host, .avTransport, "GetMediaInfo", [SonosAPI.instance])
         let source = SonosAPI.didl(media?.value("CurrentURIMetaData"), host: host)
 
-        if trackURI.hasPrefix("x-sonos-htastream") {
+        if trackURI.hasSuffix(MacAudioStreamer.path) {
+            group.title = "Mac audio"
+            group.subtitle = nil
+        } else if trackURI.hasPrefix("x-sonos-htastream") {
             group.title = "TV"
             group.subtitle = nil
         } else if trackURI.hasPrefix("x-rincon-stream") {
@@ -258,5 +265,41 @@ final class SonosModel {
             }
             try await SonosAPI.call(host, .avTransport, "Play", [SonosAPI.instance, ("Speed", "1")])
         }
+    }
+
+    /// Sends everything the Mac is playing to this group, or stops if it's already doing that.
+    func toggleMacAudio(on group: ZoneGroup) async {
+        let host = group.coordinator.host
+        if macAudioGroup == group.id {
+            streamer.stop()
+            macAudioGroup = nil
+            await run { try await SonosAPI.call(host, .avTransport, "Stop", [SonosAPI.instance]) }
+            return
+        }
+        await run {
+            let uri = try await streamer.start(reachableFrom: host)
+            macAudioGroup = group.id
+            let meta = """
+            <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="R:0/0/0" parentID="R:0/0" restricted="true"><dc:title>Mac audio</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class><desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON65031_</desc></item></DIDL-Lite>
+            """
+            do {
+                try await SonosAPI.call(host, .avTransport, "SetAVTransportURI", [
+                    SonosAPI.instance, ("CurrentURI", uri), ("CurrentURIMetaData", meta),
+                ])
+                try await SonosAPI.call(host, .avTransport, "Play", [SonosAPI.instance, ("Speed", "1")])
+            } catch {
+                streamer.stop()
+                macAudioGroup = nil
+                throw error
+            }
+        }
+    }
+
+    /// Stops capturing once the speakers have moved on to something else, so the Mac's own sound comes back.
+    private func checkMacAudio() {
+        guard let id = macAudioGroup else { return }
+        if let group = groups.first(where: { $0.id == id }), group.title == "Mac audio" { return }
+        streamer.stop()
+        macAudioGroup = nil
     }
 }
