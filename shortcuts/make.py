@@ -22,6 +22,12 @@ def output_of(uid, name):
     return {"Value": {"OutputUUID": uid, "Type": "ActionOutput", "OutputName": name}, "WFSerializationType": "WFTextTokenAttachment"}
 
 
+def as_text(var):
+    """The URL reply is a file, and If only offers "contains" on text, so read it as text."""
+    var["Value"]["Aggrandizements"] = [{"Type": "WFCoercionVariableAggrandizement", "CoercionItemClass": "WFStringContentItem"}]
+    return var
+
+
 def call(url, action, args=""):
     """A Text action holding the SOAP body, then a POST that sends it. Returns (actions, uuid of the POST)."""
     body_id, post_id = str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()
@@ -56,7 +62,7 @@ def main(name, ip):
     actions = check + [
         # Playing → pause, anything else → play.
         branch(0, {"WFCondition": 99, "WFConditionalActionString": ">PLAYING<",
-                   "WFInput": {"Type": "Variable", "Variable": output_of(state_id, "Contents of URL")}}),
+                   "WFInput": {"Type": "Variable", "Variable": as_text(output_of(state_id, "Contents of URL"))}}),
         *pause,
         branch(1),
         *play,
