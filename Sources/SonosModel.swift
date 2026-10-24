@@ -50,8 +50,13 @@ final class SonosModel {
     /// Mac audio and Spotify come out at very different loudness, so each keeps its own volume:
     /// the speakers' volume from before Mac audio started, put back when it stops.
     private var macAudioHost: String?
-    private var volumeBeforeMac: Int?
     private static let macVolumeKey = "macAudioVolume"
+    private static let beforeMacKey = "volumeBeforeMac"
+    /// Kept on disk so quitting or reinstalling the app mid-session doesn't lose it.
+    private var volumeBeforeMac: Int? {
+        get { UserDefaults.standard.object(forKey: Self.beforeMacKey) as? Int }
+        set { UserDefaults.standard.set(newValue, forKey: Self.beforeMacKey) }
+    }
 
     var allRooms: [Room] { groups.flatMap(\.rooms) }
 
@@ -292,11 +297,17 @@ final class SonosModel {
             """
             do {
                 // Switch to the volume Mac audio had last time (38 the first time), remembering the current one.
-                let current = try? await SonosAPI.call(host, .groupRendering, "GetGroupVolume", [SonosAPI.instance])
-                volumeBeforeMac = current?.value("CurrentVolume").flatMap(Int.init)
+                // If the speakers are still on the Mac stream (the app was restarted mid-session), the current
+                // volume is already the Mac one, so keep the volume saved when the session first started.
+                let position = try? await SonosAPI.call(host, .avTransport, "GetPositionInfo", [SonosAPI.instance])
+                let resuming = position?.value("TrackURI")?.hasSuffix(MacAudioStreamer.path) == true && volumeBeforeMac != nil
                 macAudioHost = host
-                let saved = UserDefaults.standard.object(forKey: Self.macVolumeKey) as? Int ?? 38
-                await setGroupVolume(group, saved)
+                if !resuming {
+                    let current = try? await SonosAPI.call(host, .groupRendering, "GetGroupVolume", [SonosAPI.instance])
+                    volumeBeforeMac = current?.value("CurrentVolume").flatMap(Int.init)
+                    let saved = UserDefaults.standard.object(forKey: Self.macVolumeKey) as? Int ?? 38
+                    await setGroupVolume(group, saved)
+                }
                 try await SonosAPI.call(host, .avTransport, "SetAVTransportURI", [
                     SonosAPI.instance, ("CurrentURI", uri), ("CurrentURIMetaData", meta),
                 ])
