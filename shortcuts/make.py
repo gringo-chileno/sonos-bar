@@ -23,17 +23,23 @@ def output_of(uid, name):
 
 
 def state_of(reply_id):
-    """Cuts the GetTransportInfo reply down to the bare state (PLAYING, PAUSED_PLAYBACK, ...).
-    Shortcuts rewrites an If "contains" on the raw reply to "is", which never matches, so If compares this with "is"."""
-    uid = str(uuid.uuid4()).upper()
+    """Cuts the GetTransportInfo reply down to the bare state (PLAYING, PAUSED_PLAYBACK, ...). Returns (actions, uuid).
+    Sonos labels the reply text/xml, so Shortcuts holds it as a file named "Control" and reading it as text
+    gives that name. Renaming it to reply.txt makes Shortcuts read the contents."""
+    name_id, uid = str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()
     reply = {"Value": {"string": "￼", "attachmentsByRange": {
-        "{0, 1}": {"OutputUUID": reply_id, "Type": "ActionOutput", "OutputName": "Contents of URL"}}},
+        "{0, 1}": {"OutputUUID": name_id, "Type": "ActionOutput", "OutputName": "Renamed Item"}}},
         "WFSerializationType": "WFTextTokenString"}
-    return {"WFWorkflowActionIdentifier": "is.workflow.actions.text.replace",
-            "WFWorkflowActionParameters": {
-                "UUID": uid, "WFInput": reply, "WFReplaceTextRegularExpression": True,
-                "WFReplaceTextFind": r"(?s)^.*<CurrentTransportState>([A-Z_]+)</CurrentTransportState>.*$",
-                "WFReplaceTextReplace": "$1"}}, uid
+    return [
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.setitemname",
+         "WFWorkflowActionParameters": {"UUID": name_id, "WFInput": output_of(reply_id, "Contents of URL"),
+                                        "WFName": "reply.txt", "WFDontIncludeFileExtension": False}},
+        {"WFWorkflowActionIdentifier": "is.workflow.actions.text.replace",
+         "WFWorkflowActionParameters": {
+             "UUID": uid, "WFInput": reply, "WFReplaceTextRegularExpression": True,
+             "WFReplaceTextFind": r"(?s)^.*<CurrentTransportState>([A-Z_]+)</CurrentTransportState>.*$",
+             "WFReplaceTextReplace": "$1"}},
+    ], uid
 
 
 def call(url, action, args=""):
@@ -68,8 +74,7 @@ def main(name, ip):
         params.update(extra or {})
         return {"WFWorkflowActionIdentifier": "is.workflow.actions.conditional", "WFWorkflowActionParameters": params}
 
-    actions = check + [
-        extract,
+    actions = check + extract + [
         # Playing → pause, anything else → play.
         branch(0, {"WFCondition": 4, "WFConditionalActionString": "PLAYING",
                    "WFInput": {"Type": "Variable", "Variable": output_of(state_id, "Updated Text")}}),
