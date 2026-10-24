@@ -22,10 +22,18 @@ def output_of(uid, name):
     return {"Value": {"OutputUUID": uid, "Type": "ActionOutput", "OutputName": name}, "WFSerializationType": "WFTextTokenAttachment"}
 
 
-def as_text(var):
-    """The URL reply is a file, and If only offers "contains" on text, so read it as text."""
-    var["Value"]["Aggrandizements"] = [{"Type": "WFCoercionVariableAggrandizement", "CoercionItemClass": "WFStringContentItem"}]
-    return var
+def state_of(reply_id):
+    """Cuts the GetTransportInfo reply down to the bare state (PLAYING, PAUSED_PLAYBACK, ...).
+    Shortcuts rewrites an If "contains" on the raw reply to "is", which never matches, so If compares this with "is"."""
+    uid = str(uuid.uuid4()).upper()
+    reply = {"Value": {"string": "￼", "attachmentsByRange": {
+        "{0, 1}": {"OutputUUID": reply_id, "Type": "ActionOutput", "OutputName": "Contents of URL"}}},
+        "WFSerializationType": "WFTextTokenString"}
+    return {"WFWorkflowActionIdentifier": "is.workflow.actions.text.replace",
+            "WFWorkflowActionParameters": {
+                "UUID": uid, "WFInput": reply, "WFReplaceTextRegularExpression": True,
+                "WFReplaceTextFind": r"(?s)^.*<CurrentTransportState>([A-Z_]+)</CurrentTransportState>.*$",
+                "WFReplaceTextReplace": "$1"}}, uid
 
 
 def call(url, action, args=""):
@@ -50,7 +58,8 @@ def call(url, action, args=""):
 def main(name, ip):
     url = f"http://{ip}:1400/MediaRenderer/AVTransport/Control"
     group = str(uuid.uuid4()).upper()
-    check, state_id = call(url, "GetTransportInfo")
+    check, reply_id = call(url, "GetTransportInfo")
+    extract, state_id = state_of(reply_id)
     pause, _ = call(url, "Pause")
     play, _ = call(url, "Play", "<Speed>1</Speed>")
 
@@ -60,9 +69,10 @@ def main(name, ip):
         return {"WFWorkflowActionIdentifier": "is.workflow.actions.conditional", "WFWorkflowActionParameters": params}
 
     actions = check + [
+        extract,
         # Playing → pause, anything else → play.
-        branch(0, {"WFCondition": 99, "WFConditionalActionString": ">PLAYING<",
-                   "WFInput": {"Type": "Variable", "Variable": as_text(output_of(state_id, "Contents of URL"))}}),
+        branch(0, {"WFCondition": 4, "WFConditionalActionString": "PLAYING",
+                   "WFInput": {"Type": "Variable", "Variable": output_of(state_id, "Updated Text")}}),
         *pause,
         branch(1),
         *play,
