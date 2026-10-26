@@ -217,7 +217,17 @@ final class SonosModel {
         await refresh()
     }
 
+    /// The panel shows the addresses it saw when it was last open until its first refresh finishes, and
+    /// speakers can come back on new ones (say, after a power cut). Read them again before acting.
+    private func current(_ group: ZoneGroup) async -> ZoneGroup {
+        guard let fresh = try? await loadTopology().first(where: { $0.id == group.id }) else { return group }
+        var group = group
+        group.rooms = fresh.rooms
+        return group
+    }
+
     func togglePlay(_ group: ZoneGroup) async {
+        let group = await current(group)
         if group.isPlaying && macAudioGroup == group.id {
             await toggleMacAudio(on: group)
             return
@@ -231,6 +241,7 @@ final class SonosModel {
     }
 
     func skip(_ group: ZoneGroup, forward: Bool) async {
+        let group = await current(group)
         await run {
             try await SonosAPI.call(group.coordinator.host, .avTransport, forward ? "Next" : "Previous", [SonosAPI.instance])
         }
@@ -260,6 +271,7 @@ final class SonosModel {
     }
 
     func play(_ favorite: Favorite, on group: ZoneGroup) async {
+        let group = await current(group)
         await run {
             let host = group.coordinator.host
             if favorite.isStation {
@@ -283,6 +295,7 @@ final class SonosModel {
 
     /// Sends everything the Mac is playing to this group, or stops if it's already doing that.
     func toggleMacAudio(on group: ZoneGroup) async {
+        let group = await current(group)
         let host = group.coordinator.host
         if macAudioGroup == group.id {
             stopMacAudio("stopped from Sonos Bar")
