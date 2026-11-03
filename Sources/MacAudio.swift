@@ -247,6 +247,33 @@ final class MacAudioStreamer {
         }
     }
 
+    /// True when some app is recording from a microphone, which is how a meeting looks from here
+    /// (Zoom, Meet in a browser, Slack huddles). Skips the speaker device the capture is built on
+    /// and the capture device itself, so Sonos Bar never counts as a meeting.
+    func micInUse() -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else { return false }
+        var devices = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &devices) == noErr else { return false }
+
+        var output = AudioObjectID(kAudioObjectUnknown)
+        var outSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        var outAddress = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &outAddress, 0, nil, &outSize, &output)
+
+        for device in devices where device != output && device != deviceID {
+            var streams = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+            var streamSize: UInt32 = 0
+            guard AudioObjectGetPropertyDataSize(device, &streams, 0, nil, &streamSize) == noErr, streamSize > 0 else { continue }
+            var running: UInt32 = 0
+            var runSize = UInt32(MemoryLayout<UInt32>.size)
+            var runAddress = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            if AudioObjectGetPropertyData(device, &runAddress, 0, nil, &runSize, &running) == noErr, running != 0 { return true }
+        }
+        return false
+    }
+
     private static func defaultOutputUID() throws -> String {
         var device = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)

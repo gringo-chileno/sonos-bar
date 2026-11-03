@@ -341,9 +341,18 @@ final class SonosModel {
         macAudioWatch = Task {
             var misses = 0
             var lastRestart = Date.distantPast
+            var checks = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
+                // Check the mic every second; a meeting starting sends sound back to the Mac right away.
+                try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
+                if streamer.micInUse() {
+                    stopMacAudio("a meeting started (microphone in use)")
+                    _ = try? await SonosAPI.call(host, .avTransport, "Stop", [SonosAPI.instance])
+                    return
+                }
+                checks += 1
+                guard checks % 5 == 0 else { continue }
                 guard let position = try? await SonosAPI.call(host, .avTransport, "GetPositionInfo", [SonosAPI.instance]),
                       let transport = try? await SonosAPI.call(host, .avTransport, "GetTransportInfo", [SonosAPI.instance]) else {
                     continue // speaker didn't answer this time; try again next round
