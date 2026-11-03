@@ -162,9 +162,9 @@ struct GroupDetail: View {
             // A switch with a fixed label, so the control shows whether it's on instead of naming the next action.
             let sendingMac = model.macAudioGroup == group.id
             HStack {
-                Label("Play Mac audio here", systemImage: "laptopcomputer")
+                Label("Play Mac Audio on Sonos", systemImage: "laptopcomputer")
                 Spacer()
-                Toggle("Play Mac audio here", isOn: Binding(
+                Toggle("Play Mac Audio on Sonos", isOn: Binding(
                     get: { sendingMac },
                     set: { _ in Task { await model.toggleMacAudio(on: group) } }
                 ))
