@@ -247,31 +247,36 @@ final class MacAudioStreamer {
         }
     }
 
-    /// True when some app is recording from a microphone, which is how a meeting looks from here
-    /// (Zoom, Meet in a browser, Slack huddles). Skips the speaker device the capture is built on
-    /// and the capture device itself, so Sonos Bar never counts as a meeting.
-    func micInUse() -> Bool {
-        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    /// Apps whose microphone use means a meeting. Dictation apps (FluidVoice, Siri) open the mic too,
+    /// sometimes just from clicking into a text field, so only these count. Prefix match covers helpers
+    /// like com.google.Chrome.helper.
+    private static let meetingApps = [
+        "us.zoom", "com.google.Chrome", "com.tinyspeck.slackmacgap", "com.microsoft.teams",
+        "com.apple.FaceTime", "com.apple.Safari", "com.apple.WebKit", "company.thebrowser",
+        "org.mozilla.firefox", "com.microsoft.edgemac", "com.brave.Browser", "com.cisco.webex",
+    ]
+
+    /// The bundle ID of a meeting app that is recording from a microphone right now, or nil.
+    func meetingAppUsingMic() -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else { return false }
-        var devices = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &devices) == noErr else { return false }
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else { return nil }
+        var processes = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &processes) == noErr else { return nil }
 
-        var output = AudioObjectID(kAudioObjectUnknown)
-        var outSize = UInt32(MemoryLayout<AudioObjectID>.size)
-        var outAddress = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &outAddress, 0, nil, &outSize, &output)
-
-        for device in devices where device != output && device != deviceID {
-            var streams = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
-            var streamSize: UInt32 = 0
-            guard AudioObjectGetPropertyDataSize(device, &streams, 0, nil, &streamSize) == noErr, streamSize > 0 else { continue }
+        for process in processes {
             var running: UInt32 = 0
             var runSize = UInt32(MemoryLayout<UInt32>.size)
-            var runAddress = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-            if AudioObjectGetPropertyData(device, &runAddress, 0, nil, &runSize, &running) == noErr, running != 0 { return true }
+            var runAddress = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyIsRunningInput, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            guard AudioObjectGetPropertyData(process, &runAddress, 0, nil, &runSize, &running) == noErr, running != 0 else { continue }
+            var bundle: Unmanaged<CFString>?
+            var bundleSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            var bundleAddress = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyBundleID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            guard AudioObjectGetPropertyData(process, &bundleAddress, 0, nil, &bundleSize, &bundle) == noErr,
+                  let id = bundle?.takeRetainedValue() as String? else { continue }
+            if Self.meetingApps.contains(where: { id.hasPrefix($0) }) { return id }
         }
-        return false
+        return nil
     }
 
     private static func defaultOutputUID() throws -> String {
