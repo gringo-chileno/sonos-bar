@@ -27,6 +27,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Sonos Bar checks whether a Chrome or Safari tab is a Google Meet, Zoom or Teams call, so it only sends sound back to the Mac for meetings.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Sonos Bar captures the sound your Mac is playing so it can send it to your Sonos speakers.</string>
 	<key>NSLocalNetworkUsageDescription</key>

@@ -14,5 +14,5 @@ xcrun swiftc -O -swift-version 5 -parse-as-library \
   Sources/*.swift -o "$APP/Contents/MacOS/SonosBar"
 
 IDENTITY=$(security find-identity -p codesigning -v | grep -m1 "Apple Development" | awk '{print $2}' || true)
-codesign --force --options runtime --sign "${IDENTITY:--}" "$APP"
+codesign --force --options runtime --entitlements SonosBar.entitlements --sign "${IDENTITY:--}" "$APP"
 echo "Built $APP"

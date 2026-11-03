@@ -1,3 +1,4 @@
+import AppKit
 import AudioToolbox
 import CoreAudio
 import Foundation
@@ -247,17 +248,44 @@ final class MacAudioStreamer {
         }
     }
 
-    /// Apps whose microphone use means a meeting. Dictation apps (FluidVoice, Siri) open the mic too,
-    /// sometimes just from clicking into a text field, so only these count. Prefix match covers helpers
-    /// like com.google.Chrome.helper.
+    /// Apps whose microphone use always means a meeting (Zoom, Slack huddles, Teams, FaceTime, Webex).
+    /// Dictation apps like FluidVoice and Siri open the mic too, so they are left out. Prefix match
+    /// covers helper processes like us.zoom.caphost.
     private static let meetingApps = [
-        "us.zoom", "com.google.Chrome", "com.tinyspeck.slackmacgap", "com.microsoft.teams",
-        "com.apple.FaceTime", "com.apple.Safari", "com.apple.WebKit", "company.thebrowser",
-        "org.mozilla.firefox", "com.microsoft.edgemac", "com.brave.Browser", "com.cisco.webex",
+        "us.zoom", "com.tinyspeck.slackmacgap", "com.microsoft.teams", "com.apple.FaceTime", "com.cisco.webex",
     ]
 
+    /// Browsers count only when one of their tabs is a meeting site, so dictating into a web page
+    /// doesn't cut the Sonos audio. Maps the mic-using process prefix to the app that owns the tabs.
+    private static let browsers = [
+        ("com.google.Chrome", "com.google.Chrome", "Google Chrome"),
+        ("com.apple.Safari", "com.apple.Safari", "Safari"),
+        ("com.apple.WebKit", "com.apple.Safari", "Safari"),
+    ]
+
+    private static let meetingSites = ["meet.google.com", "zoom.us/", "teams.microsoft.com", "teams.live.com"]
+
+    /// True if the browser has a meeting site open in any tab. If macOS won't let us read the tabs
+    /// (permission denied), treat it as a meeting so a real call still gets its sound back.
+    @MainActor static func browserHasMeetingTab(bundleID: String, name: String) -> Bool {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty else { return false }
+        let source = "tell application \"\(name)\" to get URL of every tab of every window"
+        var error: NSDictionary?
+        guard let result = NSAppleScript(source: source)?.executeAndReturnError(&error) else {
+            log("couldn't read \(name) tabs, counting it as a meeting: \(error?["NSAppleScriptErrorMessage"] ?? "unknown error")")
+            return true
+        }
+        var urls: [String] = []
+        func collect(_ d: NSAppleEventDescriptor) {
+            if d.numberOfItems > 0 { for i in 1...d.numberOfItems { if let item = d.atIndex(i) { collect(item) } } }
+            else if let url = d.stringValue { urls.append(url) }
+        }
+        collect(result)
+        return urls.contains { url in meetingSites.contains { url.contains($0) } }
+    }
+
     /// The bundle ID of a meeting app that is recording from a microphone right now, or nil.
-    func meetingAppUsingMic() -> String? {
+    @MainActor func meetingAppUsingMic() -> String? {
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else { return nil }
@@ -275,6 +303,8 @@ final class MacAudioStreamer {
             guard AudioObjectGetPropertyData(process, &bundleAddress, 0, nil, &bundleSize, &bundle) == noErr,
                   let id = bundle?.takeRetainedValue() as String? else { continue }
             if Self.meetingApps.contains(where: { id.hasPrefix($0) }) { return id }
+            if let browser = Self.browsers.first(where: { id.hasPrefix($0.0) }),
+               Self.browserHasMeetingTab(bundleID: browser.1, name: browser.2) { return "\(browser.2) meeting tab" }
         }
         return nil
     }
